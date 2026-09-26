@@ -13,6 +13,7 @@ class Cell(StrictModel):
     shaded: bool | None = False
     initials: str | None = None
     date: str | None = None
+    checked: bool | None = Field(default=None, description="Checkbox only: true for a visible mark, false for an empty box, null if uncertain or not a checkbox.")
 
 
 class Row(StrictModel):
@@ -25,13 +26,14 @@ class Section(StrictModel):
     key: Literal[
         "mp_header", "mp_operations", "mp_production", "qs_reviews", "qs_inc",
         "lot_items", "lot_regenmed", "lot_sterilization", "lot_packaging",
+        "discard_header", "discard_status", "discard_tissues", "discard_bottom",
     ]
     listed_row_count: int = Field(ge=0)
     rows: list[Row]
 
 
 class PageExtraction(StrictModel):
-    form_type: Literal["MP-F-023", "QS-F-049", "Lot Logs", "Unknown"]
+    form_type: Literal["MP-F-023", "QS-F-049", "Lot Logs", "Discard Form", "Unknown"]
     identification_text: str
     printed_page: int | None = Field(default=None, ge=1)
     complete: bool
@@ -63,5 +65,5 @@ class ReviewReport(StrictModel):
     checks_run: int
     issues: list[Issue]
     extracted_pages: list[ParsedPage]
-    rules_version: str = "regenmed-hackathon-1"
+    rules_version: str = "regenmed-hackathon-2"
     scope: str = "Pre-review only. The required two-person staff review remains in place."

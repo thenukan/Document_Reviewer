@@ -1,4 +1,4 @@
-﻿"""LlamaParse v2 adapter. All form transcription is performed by LlamaParse."""
+"""LlamaParse v2 adapter. All form transcription is performed by LlamaParse."""
 import json
 import os
 import re
@@ -15,13 +15,42 @@ class ExtractionError(RuntimeError):
     pass
 
 
+def normalize_envelope(payload):
+    """Normalize parser metadata only; never repair entered values or missing cells.
+
+    PDF page locations come from the SDK, not the printed footer. LlamaParse can
+    return a full title as the type or a form revision in place of a page number.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    payload = dict(payload)
+    form = payload.get("form_type")
+    if isinstance(form, str) and ":" in form:
+        prefix = form.split(":", 1)[0].strip()
+        if prefix in {"MP-F-023", "QS-F-049", "Lot Logs", "Discard Form"}:
+            payload["form_type"] = prefix
+    printed = payload.get("printed_page")
+    if isinstance(printed, str):
+        number = re.fullmatch(r"(?:Page\s+)?(\d+)(?:\s+of\s+\d+)?", printed.strip(), re.I)
+        if number:
+            payload["printed_page"] = int(number.group(1))
+        elif re.fullmatch(r"[A-Z]{2}-F-\d{3}(?:\.\d+)?", printed.strip(), re.I):
+            payload["printed_page"] = None  # A form revision is not a printed page number.
+    if payload.get("form_type") == "QS-F-049" and isinstance(payload.get("sections"), list):
+        # These two non-review sections are explicitly outside the QS challenge
+        # rules. Expected qs_reviews/qs_inc coverage is still checked separately.
+        payload["sections"] = [s for s in payload["sections"]
+                               if not isinstance(s, dict) or s.get("key") not in {"qs_header", "qs_disposition"}]
+    return payload
+
+
 def parse_page_json(markdown: str) -> PageExtraction:
     text = markdown.strip()
     fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
     if fenced:
         text = fenced.group(1)
     try:
-        return PageExtraction.model_validate(json.loads(text))
+        return PageExtraction.model_validate(normalize_envelope(json.loads(text)))
     except (ValueError, ValidationError) as exc:
         raise ExtractionError(
             "LlamaParse returned incomplete or unstructured transcription. "

@@ -59,6 +59,23 @@ class APITests(unittest.TestCase):
         with patch.object(module,'run_extraction',side_effect=RuntimeError('secret-api-key')):
             job=self.wait(self.send(pdf_bytes()).json()['id'])
         self.assertEqual(job['status'],'failed');self.assertNotIn('secret-api-key',str(job))
+    def test_discard_report_keeps_page_specific_findings(self):
+        from test_discard import discard
+        pages=[discard('released_packaged','ID-01',1),discard('unprocessed','ID-02',2),discard(number=3)]
+        expected=review(pages,3)
+        with patch.object(module,'run_extraction',return_value=expected):
+            response=self.send(pdf_bytes(3),'bonus-round.pdf')
+            self.assertEqual(response.status_code,202)
+            job=self.wait(response.json()['id'])
+        report=job['report']
+        self.assertEqual(report['form_type'],'Discard Form')
+        self.assertEqual(report['status'],'issues_found')
+        self.assertEqual(report['issues'][0]['page'],2)
+        self.assertEqual(report['issues'][0]['rule'],'discard_status.graft_mismatch')
+        downloaded=self.client.get('/api/reviews/'+job['id']+'/report').json()
+        self.assertEqual(downloaded,report)
+        self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/pages/3').status_code,200)
+
     def test_invalid_ids(self):
         self.assertEqual(self.client.get('/api/reviews/missing').status_code,404)
 
@@ -78,3 +95,4 @@ class AdapterTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+

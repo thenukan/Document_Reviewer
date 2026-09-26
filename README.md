@@ -1,6 +1,6 @@
-﻿# RegenMed Internal Document Reviewer
+# RegenMed Internal Document Reviewer
 
-A Dockerized FastAPI web application for the RegenMed hackathon. Open the home page, upload one PDF, and review findings alongside the original scanned pages. The app identifies MP-F-023, QS-F-049, and Lot Logs from document content, with no filename matching or stored sample answers.
+A Dockerized FastAPI web application for the RegenMed hackathon. Open the home page, upload one PDF, and review findings alongside the original scanned pages. The app identifies MP-F-023, QS-F-049, Lot Logs, and the bonus-round Discard Form (MP-F-018) from document content, with no filename matching or stored sample answers.
 
 ## Start with Docker
 
@@ -34,8 +34,12 @@ The adapter uses the [official LlamaParse Python SDK](https://developers.llamain
 | Form | Checks |
 | --- | --- |
 | MP-F-023 | Every top field from Donor # through Tissue Checked In By/Date; both initials and date for By/Date fields; Operations Manager initials/date; each white Produced/Packaged cell. |
-| QS-F-049 | Every Technical and Quality row has initials plus a date, or explicit N/A; dates retain their written separators and must be valid MM/DD/YY dates; an entered INC # requires adjacent Status. |
+| QS-F-049 | Every Technical and Quality row has initials plus a date, or explicit N/A; dates must be valid calendar dates in 2-digit MM/DD/YY order, written with `/`, `-` or `.` (used consistently); an entered INC # requires adjacent Status. |
 | Lot Logs | Page 1 Item Lot Number, Exp. Date, Manufacturer; RegenMed Item Lot and Qty Used; page 2 Item Load # and Sterilization Date; Packaging Lot and Qty Used. |
+
+| Discard Form (MP-F-018) | Donor #, Reason for Discard, authorization initials/date; one Tissue Status selected; status consistent with entered graft IDs or N/A; each listed tissue’s X box completed; every bottom field entered. |
+
+Discard Forms are checked per page, including PDFs containing multiple completed forms. All four status boxes are transcribed explicitly; zero or multiple selections are flagged. Actual graft IDs require Unreleased Packaged Tissue or Released Packaged Tissue. Explicit N/A requires Unprocessed Tissue or In Processing Tissue; mixed actual IDs and N/A cannot silently pass. Unreadable, blank, or struck-through graft entries require manual verification rather than being assumed to be N/A. Blank spare tissue rows are ignored. All seven bottom fields in the reference layout, plus any additional extracted bottom fields, are checked; explicit N/A counts as entered. The bonus requirements do not impose the QS date-format rule on Discard Forms.
 
 Interpretation of “Lot or Qty Used” and “Produced or Packaged”: a blank in **either applicable column** is flagged. Shaded MP production cells are exempt. Zero counts as entered. Entirely unlabeled spare rows are ignored; labeled rows with no entries are checked. N/A must be explicit, rather than guessed from a blank or strike-through. QS requires the slash form `N/A` (case-insensitive); ambiguous abbreviations still need staff verification.
 
@@ -104,3 +108,8 @@ docker compose run --rm -e PYTHONPATH=/workspace -v "${PWD}:/workspace" --entryp
 The script writes reports to ignored `.review-dev/` for inspection. Unit tests use synthetic transcriptions and mocked cloud responses; they do not call the provider.
 
 Core files: `app.py` (HTTP/jobs), `llama_parse.py` (provider), `reviewer/prompts.py` (transcription contract), `reviewer/models.py` (schema), `reviewer/rules.py` (checks), and `static/` (web UI).
+
+
+
+docker build -t pdf-parser .
+docker run --env-file .env -p 8000:8000 pdf-parser

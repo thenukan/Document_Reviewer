@@ -1,8 +1,9 @@
-﻿"""Deterministic checks for the challenge's form-local requirements."""
+"""Deterministic checks for the challenge's form-local requirements."""
 import re
 from datetime import datetime
 
 from reviewer.models import Cell, Issue, ParsedPage, ReviewReport
+from reviewer.discard import DISCARD_SECTIONS, review_discard_page
 
 SECTIONS = {
     'mp_header': 'Top of form', 'mp_operations': 'Operations Manager Review',
@@ -10,6 +11,8 @@ SECTIONS = {
     'qs_inc': 'Technical and Quality Review Elements — item 10',
     'lot_items': 'Item', 'lot_regenmed': 'RegenMed Item',
     'lot_sterilization': 'Item — sterilization', 'lot_packaging': 'Packaging',
+    'discard_header': 'Top of form', 'discard_status': 'Tissue Status',
+    'discard_tissues': 'List of tissues', 'discard_bottom': 'Bottom of form',
 }
 FIELDS = {
     'value': 'Value', 'produced': '# Produced', 'packaged': '# Packaged',
@@ -17,6 +20,7 @@ FIELDS = {
     'lot_number': 'Lot Number', 'expiration_date': 'Exp. Date',
     'manufacturer': 'Manufacturer', 'lot': 'Lot', 'quantity': 'Qty Used',
     'load_number': 'Load #', 'sterilization_date': 'Sterilization Date',
+    'graft_id': 'Graft ID', 'confirmation_x': 'X confirmation box',
 }
 MP_HEADER = {
     'donor_number', 'verified_by', 'cross_reference', 'donor_sex', 'donor_age',
@@ -27,6 +31,7 @@ EXPECTED = {
     'MP-F-023': {'mp_header', 'mp_operations', 'mp_production'},
     'QS-F-049': {'qs_reviews', 'qs_inc'},
     'Lot Logs': {'lot_items', 'lot_regenmed', 'lot_sterilization', 'lot_packaging'},
+    'Discard Form': DISCARD_SECTIONS,
 }
 
 
@@ -47,6 +52,8 @@ def identify(text: str) -> str:
         matches.add('QS-F-049')
     if re.search(r'\bmp\s*-?\s*f\s*-?\s*021\b', text) or re.search(r'\blot\s+logs?\b', text):
         matches.add('Lot Logs')
+    if re.search(r'\bmp\s*-?\s*f\s*-?\s*018\b', text) or re.search(r'\b(?:tissue\s+)?discard\s+form\b', text):
+        matches.add('Discard Form')
     return next(iter(matches)) if len(matches) == 1 else 'Unknown'
 
 
@@ -112,15 +119,17 @@ class Checker:
             self.add('extraction.date_evidence', page, section, row, field,
                      'The extracted date does not match the raw entry. Verify its original format.', cell.text, True)
         elif strict_date:
-            valid = bool(re.fullmatch(r'\d{2}/\d{2}/\d{2}', cell.date.strip()))
+            # Staff write MM/DD/YY with /, - or . separators; order and 2-digit parts matter, not the separator.
+            match = re.fullmatch(r'(\d{2})\s*([/.-])\s*(\d{2})\s*\2\s*(\d{2})', cell.date.strip())
+            valid = bool(match)
             if valid:
                 try:
-                    datetime.strptime(cell.date.strip(), '%m/%d/%y')
+                    datetime.strptime('/'.join(match.group(1, 3, 4)), '%m/%d/%y')
                 except ValueError:
                     valid = False
             if not valid:
                 self.add('qs_reviews.date_format', page, section, row, field,
-                         'Date must be a valid calendar date in MM/DD/YY format.', cell.date)
+                         'Date must be a valid calendar date in MM/DD/YY order (e.g. 04/23/26 or 04-23-26).', cell.date)
 
 
 def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
@@ -130,7 +139,7 @@ def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
     form = next(iter(supported)) if len(supported) == 1 else 'Unknown'
     if form == 'Unknown':
         c.add('classification.unsupported', None, 'Document', '', 'Form type',
-              'Unable to identify one supported form. Upload a single MP-F-023, QS-F-049, or Lot Log.', manual=True)
+              'Unable to identify one supported form. Upload a supported MP-F-023, QS-F-049, Lot Log, or Discard Form PDF.', manual=True)
     if len(pages) != page_count or {p.page for p in pages} != set(range(1, page_count + 1)):
         c.add('extraction.pages', None, 'Document', '', 'Pages', 'Not every PDF page was transcribed.', manual=True)
     present = set()
@@ -144,6 +153,10 @@ def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
         if not data.complete or data.uncertainties:
             c.add('extraction.incomplete', p.page, 'Document', '', 'Transcription',
                   'Extraction needs verification: ' + ('; '.join(data.uncertainties) or 'some content is unreadable or missing.'), manual=True)
+        if form == 'Discard Form':
+            review_discard_page(c, p)
+            present.update(s.key for s in data.sections if s.key in DISCARD_SECTIONS)
+            continue
         seen = set()
         for section in data.sections:
             key = section.key
@@ -198,7 +211,7 @@ def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
                     }[key]
                     for field in required:
                         c.required(cells.get(field), p.page, key, label, field)
-    for missing in sorted(EXPECTED.get(form, set()) - present):
+    for missing in sorted((EXPECTED.get(form, set()) - present) if form != 'Discard Form' else set()):
         c.add('extraction.missing_section', None, missing, '', '', 'Required section is missing or was not extracted.', manual=True)
     if form == 'Lot Logs':
         if page_count != 2:

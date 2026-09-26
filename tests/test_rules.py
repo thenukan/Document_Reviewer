@@ -1,4 +1,5 @@
 ﻿import copy
+import json
 import unittest
 from reviewer.models import Cell, Row, Section, PageExtraction, ParsedPage
 from reviewer.rules import MP_HEADER, review
@@ -58,10 +59,16 @@ class RuleTests(unittest.TestCase):
         self.assertEqual({i.rule for i in issues},{'qs_reviews.initials','qs_reviews.date'})
 
     def test_qs_original_date_format_and_calendar(self):
-        for date in ['4/23/26','04-23-26','04.23.26','04/23/2026','02/30/26','13/01/26']:
+        for date in ['4/23/26','04/23/2026','02/30/26','13/01/26','04-23/26','23/04/26']:
             with self.subTest(date=date):
                 p=qs();p[0].extraction.sections[0].rows[0].cells['technical']=signature('AB '+date,date=date)
                 self.assertIn('qs_reviews.date_format',[i.rule for i in review(p,1).issues])
+
+    def test_qs_date_separators_are_flexible(self):
+        for date in ['04/23/26','04-23-26','04.23.26','11 - 29 - 24']:
+            with self.subTest(date=date):
+                p=qs();p[0].extraction.sections[0].rows[0].cells['technical']=signature('AB '+date,date=date)
+                self.assertNotIn('qs_reviews.date_format',[i.rule for i in review(p,1).issues])
 
     def test_qs_na_is_exempt(self):
         p=qs();p[0].extraction.sections[0].rows[0].cells['technical']=cell('n/a')
@@ -126,6 +133,34 @@ class RuleTests(unittest.TestCase):
         p[0].extraction.sections[0].rows[0].cells['manufacturer']=cell('—')
         self.assertEqual(review(p,2).status,'needs_review')
 
+    def test_parser_metadata_normalization_preserves_entered_values(self):
+        payload=qs()[0].extraction.model_dump()
+        payload['form_type']='QS-F-049: Technical/Quality Review and Disposition Statement'
+        payload['printed_page']='Page 1 of 1'
+        payload['sections'][0]['rows'][0]['cells']['technical']['text']='AB 04-23-26'
+        payload['sections'][0]['rows'][0]['cells']['technical']['date']='04-23-26'
+        parsed=parse_page_json(json.dumps(payload))
+        self.assertEqual(parsed.form_type,'QS-F-049')
+        self.assertEqual(parsed.printed_page,1)
+        self.assertEqual(parsed.sections[0].rows[0].cells['technical'].date,'04-23-26')
+        payload['printed_page']='MP-F-018.005'
+        self.assertIsNone(parse_page_json(json.dumps(payload)).printed_page)
+        payload['printed_page']='unreadable footer'
+        with self.assertRaises(ExtractionError):parse_page_json(json.dumps(payload))
+
+    def test_out_of_scope_qs_sections_do_not_hide_missing_review_rows(self):
+        payload=qs()[0].extraction.model_dump()
+        payload['sections'].append({'key':'qs_disposition','listed_row_count':0,'rows':[]})
+        parsed=parse_page_json(json.dumps(payload))
+        self.assertEqual(len(parsed.sections),2)
+        payload['sections']=[payload['sections'][-1]]
+        parsed=parse_page_json(json.dumps(payload))
+        self.assertEqual(review([ParsedPage(page=1,extraction=parsed)],1).status,'needs_review')
+
+    def test_invalid_discard_structure_is_still_rejected(self):
+        with self.assertRaises(ExtractionError):
+            parse_page_json(json.dumps({'form_type':'Discard Form','discard_header':[]}))
+
     def test_parser_fenced_json_and_invalid_outputs(self):
         extracted=qs()[0].extraction
         self.assertEqual(parse_page_json('```json\n'+extracted.model_dump_json()+'\n```'),extracted)
@@ -134,4 +169,5 @@ class RuleTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
 
