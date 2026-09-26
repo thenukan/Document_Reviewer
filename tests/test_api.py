@@ -112,6 +112,38 @@ class APITests(unittest.TestCase):
         self.assertEqual(downloaded,report)
         self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/pages/3').status_code,200)
 
+    def test_non_list_uncertainties_and_unknown_sections_return_partial_report(self):
+        extracted=qs()[0].extraction.model_dump()
+        valid_sections=extracted['sections'][:]
+        extracted['uncertainties']={'note':'Verify the handwritten date'}
+        extracted['sections'][:0]=[
+            {'key':'unknown_header','listed_row_count':0,'rows':[]},
+            {'key':'unknown_footer','listed_row_count':0,'rows':[]},
+        ]
+        response={'job':{'status':'COMPLETED'},'markdown':{'pages':[
+            {'page_number':1,'markdown':json.dumps(extracted)},
+            {'page_number':2,'markdown':qs()[0].extraction.model_dump_json()},
+        ]}}
+        with patch('llama_parse.LlamaCloud') as cls:
+            cls.return_value.__enter__.return_value.parsing.parse.return_value.model_dump.return_value=response
+            job=self.wait(self.send(pdf_bytes(2)).json()['id'])
+        self.assertEqual(job['status'],'completed')
+        report=job['report']
+        self.assertEqual(report['status'],'needs_review')
+        self.assertTrue(report['passed_checks'])
+        self.assertEqual(report['extracted_pages'][0]['extraction']['sections'],valid_sections)
+        self.assertFalse(report['extracted_pages'][0]['extraction']['complete'])
+        self.assertTrue(report['extracted_pages'][1]['extraction']['complete'])
+        warnings=[issue for issue in report['issues'] if issue['rule']=='extraction.incomplete']
+        self.assertEqual(len(warnings),1)
+        self.assertEqual(warnings[0]['page'],1)
+        self.assertIn('unexpected format',warnings[0]['message'])
+        self.assertIn('Verify the handwritten date',warnings[0]['message'])
+        self.assertIn('Skipped extracted section 1',warnings[0]['message'])
+        self.assertIn('Skipped extracted section 2',warnings[0]['message'])
+        self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/report').json(),report)
+        self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/pages/1').status_code,200)
+
     def test_mp_missing_states_returns_downloadable_partial_report(self):
         from test_parser_errors import mp_missing_states
         payload={'job':{'status':'COMPLETED'},'markdown':{'pages':[
@@ -131,6 +163,47 @@ class APITests(unittest.TestCase):
         self.assertEqual(cell['state'],'uncertain')
         self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/report').json(),report)
         self.assertEqual(self.client.get('/api/reviews/'+job['id']+'/pages/1').status_code,200)
+
+    def test_missing_row_label_returns_downloadable_partial_report(self):
+        extracted=qs()[0].extraction.model_dump()
+        cells=extracted['sections'][1]['rows'][0]['cells']
+        cells['inc'].update(text='CT-001',state='filled')
+        cells['status'].update(text='Closed',state='filled')
+        expected_sections=json.loads(json.dumps(extracted['sections']))
+        expected_sections[1]['rows'][0]['label']='Row 1 (label unavailable)'
+        del extracted['sections'][1]['rows'][0]['label']
+        valid_page=qs()[0].extraction.model_dump()
+        response={'job':{'status':'COMPLETED'},'markdown':{'pages':[
+            {'page_number':1,'markdown':json.dumps(extracted)},
+            {'page_number':2,'markdown':json.dumps(valid_page)},
+        ]}}
+        with patch('llama_parse.LlamaCloud') as cls:
+            cls.return_value.__enter__.return_value.parsing.parse.return_value.model_dump.return_value=response
+            job=self.wait(self.send(pdf_bytes(2)).json()['id'])
+        self.assertEqual(job['status'],'completed')
+        report=job['report']
+        self.assertEqual(report['status'],'needs_review')
+        self.assertTrue(report['passed_checks'])
+        self.assertEqual(len(report['extracted_pages']),2)
+        recovered=report['extracted_pages'][0]['extraction']
+        self.assertFalse(recovered['complete'])
+        self.assertEqual(recovered['sections'],expected_sections)
+        self.assertEqual(report['extracted_pages'][1]['extraction'],valid_page)
+        warnings=[issue for issue in report['issues'] if issue['rule']=='extraction.incomplete']
+        self.assertEqual(len(warnings),1)
+        self.assertEqual(warnings[0]['page'],1)
+        message=warnings[0]['message'].lower()
+        self.assertIn('section 2',message)
+        self.assertIn('row 1',message)
+        self.assertRegex(message,r'(missing|unavailable).*label|label.*(missing|unavailable)')
+        download=self.client.get('/api/reviews/'+job['id']+'/report')
+        self.assertEqual(download.status_code,200)
+        self.assertIn('attachment',download.headers['content-disposition'])
+        self.assertEqual(download.json(),report)
+        preview=self.client.get('/api/reviews/'+job['id']+'/pages/1')
+        self.assertEqual(preview.status_code,200)
+        self.assertEqual(preview.headers['content-type'],'image/png')
+        self.assertTrue(preview.content.startswith(b'\x89PNG'))
 
     def test_invalid_ids(self):
         self.assertEqual(self.client.get('/api/reviews/missing').status_code,404)

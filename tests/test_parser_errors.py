@@ -74,6 +74,169 @@ class ParserErrorTests(unittest.TestCase):
         payload['uncertainties'] = ['Unreadable handwriting']
         self.assertFalse(parse_page_json(json.dumps(payload)).complete)
 
+    def test_non_list_uncertainties_preserve_notes_and_always_need_review(self):
+        for raw in ['Unreadable initials; verify date \u2014 page 1', '', None, False, 0,
+                    {'technical': 'Date is unclear', 'rows': [1, 2]}]:
+            with self.subTest(raw=raw):
+                payload = qs()[0].extraction.model_dump()
+                payload['uncertainties'] = raw
+                parsed = parse_page_json(json.dumps(payload))
+                self.assertEqual(parsed.sections, qs()[0].extraction.sections)
+                self.assertFalse(parsed.complete)
+                self.assertIn('unexpected format', parsed.uncertainties[0])
+                original = parsed.uncertainties[1].removeprefix('Original uncertainty notes: ')
+                if isinstance(raw, str):
+                    self.assertEqual(original, raw)
+                else:
+                    self.assertEqual(json.loads(original), raw)
+                report = review([ParsedPage(page=1, extraction=parsed)], 1)
+                self.assertEqual(report.status, 'needs_review')
+                self.assertTrue(report.passed_checks)
+                self.assertEqual(report.issues[0].rule, 'extraction.incomplete')
+                self.assertEqual(report.issues[0].page, 1)
+
+    def test_non_list_uncertainties_recover_with_unknown_sections_and_missing_states(self):
+        payload = mp_missing_states()
+        payload['uncertainties'] = 'Check the handwriting'
+        payload['sections'].insert(0, {'key': 'unknown_header', 'listed_row_count': 0, 'rows': []})
+        payload['sections'].insert(1, {'key': 'unknown_footer', 'listed_row_count': 0, 'rows': []})
+        parsed = parse_page_json(json.dumps(payload))
+        self.assertEqual(len(parsed.sections), 3)
+        self.assertFalse(parsed.complete)
+        notes = '; '.join(parsed.uncertainties)
+        self.assertIn('Check the handwriting', notes)
+        self.assertIn('Skipped extracted section 1', notes)
+        self.assertIn('Skipped extracted section 2', notes)
+        self.assertIn('85 cell(s)', notes)
+        self.assertEqual(parsed.sections[2].rows[0].cells['produced'].text, '0')
+        self.assertEqual(parsed.sections[2].rows[0].cells['produced'].state, 'uncertain')
+        self.assertEqual(review([ParsedPage(page=1, extraction=parsed)], 1).status, 'needs_review')
+
+    def test_non_list_uncertainties_do_not_hide_malformed_form_data(self):
+        for defect in ['missing_complete', 'missing_text', 'invalid_state', 'missing_section_key',
+                       'extra_field']:
+            with self.subTest(defect=defect):
+                payload = qs()[0].extraction.model_dump()
+                payload['uncertainties'] = 'Check the handwriting'
+                if defect == 'missing_complete':
+                    del payload['complete']
+                elif defect == 'missing_text':
+                    del payload['sections'][0]['rows'][0]['cells']['technical']['text']
+                elif defect == 'invalid_state':
+                    payload['sections'][0]['rows'][0]['cells']['technical']['state'] = 'invalid'
+                elif defect == 'missing_section_key':
+                    del payload['sections'][0]['key']
+                else:
+                    payload['unexpected'] = 'private-value'
+                with self.assertRaises(ExtractionError) as caught:
+                    parse_page_json(json.dumps(payload))
+                self.assertIn('uncertainties: list_type', caught.exception.diagnostic)
+                self.assertNotIn('private-value', caught.exception.diagnostic)
+
+    def test_uncertainty_arrays_still_require_string_items(self):
+        payload = qs()[0].extraction.model_dump()
+        payload['uncertainties'] = [None]
+        with self.assertRaises(ExtractionError) as caught:
+            parse_page_json(json.dumps(payload))
+        self.assertIn('uncertainties.0: string_type', caught.exception.diagnostic)
+
+    def test_missing_or_null_row_labels_preserve_values_for_every_form(self):
+        from test_discard import discard
+        for factory in [mp, qs, lot, lambda: [discard()]]:
+            for defect in ['missing', 'null']:
+                pages = factory()
+                payload = pages[0].extraction.model_dump()
+                payload['uncertainties'] = ['Existing warning']
+                original = pages[0].extraction.sections[1].rows[0]
+                row = payload['sections'][1]['rows'][0]
+                if defect == 'missing':
+                    del row['label']
+                else:
+                    row['label'] = None
+                with self.subTest(form=payload['form_type'], defect=defect):
+                    parsed = parse_page_json(json.dumps(payload))
+                    restored = parsed.sections[1].rows[0]
+                    self.assertEqual(restored.label, 'Row 1 (label unavailable)')
+                    self.assertEqual(restored.key, original.key)
+                    self.assertEqual(restored.cells, original.cells)
+                    self.assertEqual(len(parsed.sections[1].rows), len(pages[0].extraction.sections[1].rows))
+                    self.assertFalse(parsed.complete)
+                    self.assertEqual(parsed.uncertainties[0], 'Existing warning')
+                    self.assertIn('section 2, row 1', parsed.uncertainties[1])
+                    pages[0] = ParsedPage(page=1, extraction=parsed)
+                    report = review(pages, len(pages))
+                    self.assertEqual(report.status, 'needs_review')
+                    self.assertTrue(report.passed_checks)
+
+    def test_missing_labels_recover_with_other_metadata_defects(self):
+        payload = mp_missing_states()
+        payload['uncertainties'] = 'Verify handwriting'
+        del payload['sections'][1]['rows'][0]['label']
+        del payload['sections'][2]['rows'][1]['label']
+        payload['sections'].insert(0, {'key': 'unknown_header', 'listed_row_count': 0,
+                                      'rows': [{'key': 'unknown_row', 'cells': {}}]})
+        parsed = parse_page_json(json.dumps(payload))
+        self.assertEqual(len(parsed.sections), 3)
+        self.assertEqual(parsed.sections[1].rows[0].label, 'Row 1 (label unavailable)')
+        self.assertEqual(parsed.sections[2].rows[1].label, 'Row 2 (label unavailable)')
+        self.assertEqual(parsed.sections[2].rows[1].cells['produced'].text, '0')
+        notes = '; '.join(parsed.uncertainties)
+        self.assertIn('Verify handwriting', notes)
+        self.assertIn('Skipped extracted section 1', notes)
+        self.assertIn('85 cell(s)', notes)
+        self.assertIn('section 3, row 1', notes)
+        self.assertIn('section 4, row 2', notes)
+        self.assertNotIn('section 1, row 1', notes)
+        self.assertEqual(review([ParsedPage(page=1, extraction=parsed)], 1).status, 'needs_review')
+
+    def test_missing_labels_do_not_hide_missing_or_malformed_form_data(self):
+        for defect in ['text', 'cells', 'key', 'complete', 'label_object']:
+            payload = qs()[0].extraction.model_dump()
+            del payload['sections'][1]['rows'][0]['label']
+            row = payload['sections'][0]['rows'][0]
+            if defect == 'text':
+                del row['cells']['technical']['text']
+            elif defect in {'cells', 'key'}:
+                del row[defect]
+            elif defect == 'complete':
+                del payload['complete']
+            else:
+                row['label'] = {'private-key': 'private-value'}
+            with self.subTest(defect=defect), self.assertRaises(ExtractionError) as caught:
+                parse_page_json(json.dumps(payload))
+            self.assertIn('sections.1.rows.0.label: missing', caught.exception.diagnostic)
+            self.assertNotIn('private-value', caught.exception.diagnostic)
+
+    def test_missing_mp_header_label_does_not_overclaim_signature_checks(self):
+        payload = mp()[0].extraction.model_dump()
+        payload['sections'][0]['rows'].append({
+            'key': 'additional_review',
+            'cells': {'value': {'text': 'AB', 'state': 'filled', 'initials': 'AB', 'date': None}},
+        })
+        payload['sections'][0]['listed_row_count'] += 1
+        parsed = parse_page_json(json.dumps(payload))
+        row = parsed.sections[0].rows[-1]
+        self.assertEqual(row.cells['value'].text, 'AB')
+        self.assertEqual(row.cells['value'].initials, 'AB')
+        self.assertIsNone(row.cells['value'].date)
+        self.assertEqual(row.cells['value'].state, 'uncertain')
+        report = review([ParsedPage(page=1, extraction=parsed)], 1)
+        self.assertEqual(report.status, 'needs_review')
+        self.assertFalse(any(check.row == row.label for check in report.passed_checks))
+        self.assertTrue(any(issue.rule == 'extraction.uncertain' and issue.row == row.label
+                            for issue in report.issues))
+
+    def test_missing_mp_signature_label_keeps_checks_determined_by_key(self):
+        payload = mp()[0].extraction.model_dump()
+        for row in payload['sections'][0]['rows']:
+            if row['key'] == 'tissue_checked_in':
+                del row['label']
+                row['cells']['value']['date'] = None
+        parsed = parse_page_json(json.dumps(payload))
+        report = review([ParsedPage(page=1, extraction=parsed)], 1)
+        self.assertEqual(report.status, 'needs_review')
+        self.assertIn('mp_header.date', [issue.rule for issue in report.issues])
+
     def test_unknown_sections_are_skipped_without_losing_valid_details(self):
         payload = qs()[0].extraction.model_dump()
         original = qs()[0].extraction.sections

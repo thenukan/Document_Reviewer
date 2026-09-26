@@ -62,9 +62,11 @@ def normalize_envelope(payload):
 
 
 def recover_partial_page(payload, errors):
-    """Recover known metadata omissions without inventing any entered values."""
+    """Recover known metadata defects without inventing any entered values."""
     skipped = set()
     missing_states = []
+    missing_labels = []
+    malformed_uncertainties = False
     for error in errors:
         loc = error['loc']
         if (error['type'] == 'literal_error' and len(loc) == 3
@@ -75,10 +77,28 @@ def recover_partial_page(payload, errors):
                 and loc[2] == 'rows' and isinstance(loc[3], int)
                 and loc[4] == 'cells' and isinstance(loc[5], str) and loc[6] == 'state'):
             missing_states.append(loc)
+        elif (len(loc) == 5 and loc[0] == 'sections' and isinstance(loc[1], int)
+                and loc[2] == 'rows' and isinstance(loc[3], int) and loc[4] == 'label'
+                and (error['type'] == 'missing'
+                     or (error['type'] == 'string_type'
+                         and payload['sections'][loc[1]]['rows'][loc[3]].get('label') is None))):
+            missing_labels.append(loc)
+        elif error['type'] == 'list_type' and loc == ('uncertainties',):
+            malformed_uncertainties = True
         else:
             return None  # Other malformed data must still fail validation.
 
     partial = deepcopy(payload)
+    if malformed_uncertainties:
+        # These are parser notes, not form entries. Preserve the original value
+        # as text rather than treating a malformed value as "no uncertainties".
+        raw = partial['uncertainties']
+        original = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        partial['uncertainties'] = [
+            'LlamaParse returned uncertainty notes in an unexpected format. '
+            'Check this page on the original PDF.',
+            f'Original uncertainty notes: {original}',
+        ]
     counts = {}
     for loc in missing_states:
         if loc[1] in skipped:
@@ -86,6 +106,23 @@ def recover_partial_page(payload, errors):
         cell = partial['sections'][loc[1]]['rows'][loc[3]]['cells'][loc[5]]
         cell['state'] = 'uncertain'
         counts[loc[1]] = counts.get(loc[1], 0) + 1
+    label_warnings = []
+    for loc in missing_labels:
+        if loc[1] in skipped:
+            continue
+        section = partial['sections'][loc[1]]
+        row = section['rows'][loc[3]]
+        row['label'] = f'Row {loc[3] + 1} (label unavailable)'
+        warning = (f'Extracted section {loc[1] + 1}, row {loc[3] + 1}: the row label was missing '
+                   'or null. A display placeholder is used; extracted values are preserved. '
+                   'Check this row on the original PDF.')
+        if section['key'] == 'mp_header' and row['key'] not in {'clean_room_review', 'tissue_checked_in'}:
+            # Some header By/Date checks depend on the printed label. Retain
+            # text and components, but do not issue a presence pass for this cell.
+            if 'value' in row['cells']:
+                row['cells']['value']['state'] = 'uncertain'
+            warning += ' The header entry is uncertain because its label determines which checks apply.'
+        label_warnings.append(warning)
     partial['sections'] = [section for index, section in enumerate(partial['sections'])
                            if index not in skipped]
     partial['complete'] = False
@@ -96,7 +133,7 @@ def recover_partial_page(payload, errors):
         f'Extracted section {index + 1}: LlamaParse omitted the filled/blank/uncertain state '
         f'for {count} cell(s). Their text is preserved, but the entries require manual verification.'
         for index, count in sorted(counts.items())
-    ]
+    ] + label_warnings
     return PageExtraction.model_validate(partial)
 
 

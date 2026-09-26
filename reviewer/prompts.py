@@ -103,9 +103,17 @@ Do not emit absent sections from another page. Unknown forms have no sections.
 IMPORTANT OUTPUT STRUCTURE (applies to ALL four form types):
 The root JSON object MUST have these six keys: form_type, identification_text,
 printed_page, complete, uncertainties, sections. form_type is REQUIRED even when
-identification_text contains the form title. sections MUST be an ARRAY of objects.
+identification_text contains the form title. uncertainties MUST be an ARRAY of
+strings: [] when there are no uncertainties, or ["Describe the uncertainty"]
+when there are. Never return a string, object, boolean, or null for uncertainties.
+sections MUST be an ARRAY of objects. Every section's key MUST exactly match one
+of the section keys listed above for the identified form; do not use the printed
+heading or invent an alternative section name.
 Each section object MUST have exactly key, listed_row_count, rows. Each row object
-MUST have key, label, cells. A cells object maps each specified cell name to a Cell.
+MUST have key, label, cells. label is REQUIRED on EVERY row, including single-row
+sections. It must be a string containing the visible row description, not null.
+Do not omit label to shorten the output or drop the row's entered values.
+A cells object maps each specified cell name to a Cell.
 EVERY Cell MUST include text AND state, including every MP-F-023 produced and
 packaged cell. state must be filled, blank, or uncertain; never omit it to shorten
 large tables. Use uncertain when the cell cannot be read confidently. Shaded cells
