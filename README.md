@@ -27,7 +27,7 @@ Your existing `.env` is preserved. Compose forwards only the reviewer settings, 
 1. Validate the uploaded PDF (default limits: 20 MB, 10 pages; encrypted/damaged files are rejected).
 2. LlamaParse v2's agentic parser reads scanned handwriting and transcribes each page into a schema. It preserves raw dates, N/A, blank cells, shading, row identities, and initials/date components. The uploaded filename is not used for identification.
 3. Pydantic validates the transcription. Python code identifies the form from extracted printed identifiers/titles and applies the challenge checks. The parser does not decide whether the form passes.
-4. Findings identify the page, section, row, field, and observed value. Clicking a finding selects its page. The UI also shows extracted values and offers a JSON report download.
+4. Findings identify the page, section, row, field, and observed value. Clicking a finding selects its page. Expand **View passed checks** to inspect successful rules and their supporting values, including when all checks pass; each entry links to its original page. Related checks (such as initials and date) are grouped, and exempt shaded cells are omitted. The UI also shows extracted values and offers a JSON report download including `passed_checks`.
 
 The adapter uses the [official LlamaParse Python SDK](https://developers.llamaindex.ai/llamaparse/parse/getting_started/) and its custom parsing prompt. It requires a funded LlamaCloud account. No separate LLM provider is used.
 
@@ -46,6 +46,8 @@ Interpretation of “Lot or Qty Used” and “Produced or Packaged”: a blank 
 There are no external product-code lookups, donor-system integrations, or extra release/temperature rules. The detailed challenge requirements define the checks.
 
 Missing pages, missing sections, unreadable handwriting, inconsistent extraction row counts, and uncertain shading prevent a pass. `needs_review` can include confirmed field issues as well as extraction warnings. OCR can still misread content or omit a row without detecting the omission; inspect the original form and keep the required two-person review. The supplied examples are smoke tests, not a measured accuracy benchmark on unseen judge PDFs.
+
+If schema errors are limited to unrecognized section names or missing cell states, the reviewer displays a partial report. Unrecognized sections are skipped. Cells missing their filled/blank/uncertain state keep their extracted text and are marked uncertain for manual verification. Page-specific warnings describe these omissions, and the incomplete transcription prevents an automatic pass. Invalid JSON and other schema errors still stop the review.
 
 ## Configuration
 

@@ -17,16 +17,35 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from llama_extraction import run_extraction
-from llama_parse import ExtractionError
+from llama_extraction import RulesError, run_extraction
+from llama_parse import ExtractionError, config_problems
 
 load_dotenv()
-ROOT = Path(__file__).resolve().parent
-MAX_BYTES = int(os.getenv('MAX_UPLOAD_MB', '20')) * 1024 * 1024
-MAX_PAGES = int(os.getenv('MAX_PAGES', '10'))
-TTL = max(60, int(os.getenv('REVIEW_TTL_SECONDS', '3600')))
-MAX_JOBS = 24
 log = logging.getLogger('regenmed')
+CONFIG_WARNINGS = []
+
+
+def env_int(name, default):
+    """Read a positive integer setting; a bad value falls back to the default and is reported in /healthz."""
+    raw = os.getenv(name, '').strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        if value < 1:
+            raise ValueError
+        return value
+    except ValueError:
+        CONFIG_WARNINGS.append(f'{name} must be a positive whole number; using {default}.')
+        log.warning('Invalid %s=%r; using %s', name, raw, default)
+        return default
+
+
+ROOT = Path(__file__).resolve().parent
+MAX_BYTES = env_int('MAX_UPLOAD_MB', 20) * 1024 * 1024
+MAX_PAGES = env_int('MAX_PAGES', 10)
+TTL = max(60, env_int('REVIEW_TTL_SECONDS', 3600))
+MAX_JOBS = 24
 
 
 def configured():
@@ -71,6 +90,8 @@ class ReviewStore:
 
 @asynccontextmanager
 async def lifespan(app):
+    for problem in config_problems():
+        log.warning('Configuration problem: %s', problem)
     app.state.reviews = ReviewStore()
     yield
     app.state.reviews.close()
@@ -96,7 +117,8 @@ def index():
 
 @app.get('/healthz')
 def health():
-    return {'status': 'ok', 'parser_configured': configured(), 'max_upload_mb': MAX_BYTES // 1024 // 1024}
+    return {'status': 'ok', 'parser_configured': configured(), 'max_upload_mb': MAX_BYTES // 1024 // 1024,
+            'config_errors': CONFIG_WARNINGS + config_problems()}
 
 
 def process_review(store, job_id, pdf_path, page_count):
@@ -105,6 +127,12 @@ def process_review(store, job_id, pdf_path, page_count):
         report = run_extraction(pdf_path, page_count)
         store.update(job_id, status='completed', stage='Review complete',
                      report=report.model_dump(mode='json'), finished=time.time())
+    except RulesError:
+        # Our own code failed, so the traceback is safe to log and needed for debugging.
+        log.error('Review %s failed while applying form checks', job_id, exc_info=True)
+        message = ('Internal error while applying the form checks. The document has not passed review; '
+                   'check the server logs.')
+        store.update(job_id, status='failed', stage='Review could not complete', error=message, finished=time.time())
     except Exception as exc:
         # Provider exceptions can contain credentials/URLs. Do not expose or log them.
         message = str(exc) if isinstance(exc, ExtractionError) else 'The document service could not complete this review. Try again shortly.'
@@ -115,7 +143,10 @@ def process_review(store, job_id, pdf_path, page_count):
             message = 'LlamaParse is rate-limited or has insufficient credits. Retry after checking your account.'
         elif 'Timeout' in type(exc).__name__:
             message = 'LlamaParse timed out. Retry with a clearer or smaller PDF.'
-        log.warning('Review %s failed (%s)', job_id, type(exc).__name__)
+        if isinstance(exc, ExtractionError) and exc.diagnostic:
+            log.warning('Review %s failed (%s): %s', job_id, type(exc).__name__, exc.diagnostic)
+        else:
+            log.warning('Review %s failed (%s)', job_id, type(exc).__name__)
         store.update(job_id, status='failed', stage='Review could not complete', error=message, finished=time.time())
 
 
@@ -123,6 +154,8 @@ def process_review(store, job_id, pdf_path, page_count):
 def upload_review(file: UploadFile = File(...)):
     if not configured():
         raise HTTPException(503, 'Set LLAMA_PARSE_API_KEY or LLAMA_CLOUD_API_KEY on the server to enable reviews.')
+    if problems := config_problems():
+        raise HTTPException(503, 'Server configuration error: ' + ' '.join(problems))
     if not file.filename or Path(file.filename).suffix.lower() != '.pdf':
         raise HTTPException(415, 'Upload one PDF file.')
     store = app.state.reviews
@@ -131,21 +164,31 @@ def upload_review(file: UploadFile = File(...)):
         if len(store.jobs) >= MAX_JOBS:
             raise HTTPException(503, 'The review queue is full. Try again after existing reviews expire.')
         directory = store.root / job_id
-        directory.mkdir()
+        try:
+            directory.mkdir()
+        except OSError as exc:
+            log.error('Could not create upload directory for %s: %s', job_id, exc)
+            raise HTTPException(503, 'The server could not store the upload. Try again shortly.') from exc
         store.jobs[job_id] = {'id': job_id, 'filename': Path(file.filename.replace('\\', '/')).name,
                               'status': 'uploading', 'stage': 'Checking PDF', 'created': time.time()}
     pdf_path = directory / 'source.pdf'
     try:
         size = 0
-        with pdf_path.open('wb') as target:
-            while chunk := file.file.read(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_BYTES:
-                    raise HTTPException(413, f'PDF exceeds the {MAX_BYTES // 1024 // 1024} MB limit.')
-                target.write(chunk)
-        with pdf_path.open('rb') as source:
-            if b'%PDF-' not in source.read(1024):
-                raise HTTPException(415, 'The uploaded file is not a valid PDF.')
+        try:
+            with pdf_path.open('wb') as target:
+                while chunk := file.file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise HTTPException(413, f'PDF exceeds the {MAX_BYTES // 1024 // 1024} MB limit.')
+                    target.write(chunk)
+            with pdf_path.open('rb') as source:
+                header = source.read(1024)
+        except OSError as exc:
+            # Usually a full or read-only temp disk.
+            log.error('Could not store upload %s: %s', job_id, exc)
+            raise HTTPException(503, 'The server could not store the upload (storage may be full). Try again shortly.') from exc
+        if b'%PDF-' not in header:
+            raise HTTPException(415, 'The uploaded file is not a valid PDF.')
         try:
             with fitz.open(pdf_path) as doc:
                 if doc.needs_pass:
@@ -187,13 +230,20 @@ def page_preview(job_id: str, page_number: int):
     job = store.get(job_id)
     if not 1 <= page_number <= job.get('page_count', 0):
         raise HTTPException(404, 'Page not found.')
+    # Hold the lock only to read the file (so the sweeper cannot delete it mid-read);
+    # render outside it so previews do not block status polling.
     with store.lock:
         path = store.root / job_id / 'source.pdf'
-        if not path.exists():
-            raise HTTPException(404, 'Review has expired.')
-        with fitz.open(path) as doc:
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            raise HTTPException(404, 'Review has expired.') from None
+    try:
+        with fitz.open(stream=data, filetype='pdf') as doc:
             page = doc[page_number - 1]
             zoom = min(2, 1600 / max(page.rect.width, page.rect.height))
             png = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False).tobytes('png')
+    except Exception as exc:
+        log.error('Preview of review %s page %s failed', job_id, page_number, exc_info=True)
+        raise HTTPException(500, 'The page preview could not be rendered.') from exc
     return Response(png, media_type='image/png')
-

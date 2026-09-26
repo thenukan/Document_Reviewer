@@ -9,8 +9,29 @@ $('file').addEventListener('change', selectFile);
 for (const type of ['dragenter', 'dragover']) $('dropzone').addEventListener(type, e => {e.preventDefault(); if (!busy) $('dropzone').classList.add('dragging');});
 for (const type of ['dragleave', 'drop']) $('dropzone').addEventListener(type, e => { e.preventDefault(); $('dropzone').classList.remove('dragging'); });
 $('dropzone').addEventListener('drop', e => { if (busy) return; if (e.dataTransfer.files.length !== 1) return notice('Choose one PDF at a time.'); $('file').files = e.dataTransfer.files; selectFile(); });
-async function request(url, options) { const response = await fetch(url, options); let data; try {data = await response.json();} catch {throw Error('The server returned an unreadable response. Please retry.');} if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'The request could not be completed.'); return data; }
-fetch('/healthz').then(r=>r.json()).then(data=>{ maxMB = data.max_upload_mb; $('file-help').textContent = `One file · up to ${maxMB} MB`; if (!data.parser_configured) notice('LlamaParse is not configured yet. Add a LlamaParse API key to the server environment to enable reviews.'); }).catch(()=>notice('Cannot reach the server. Refresh to retry.'));
+function statusMessage(status) {
+  if (status === 413) return `The PDF is too large for the server (limit ${maxMB} MB).`;
+  if (status === 404) return 'Review not found or expired. Upload the PDF again.';
+  if (status === 429) return 'Too many requests. Wait a moment and retry.';
+  if (status >= 500) return 'The server is temporarily unavailable. Please retry shortly.';
+  return `The request could not be completed (HTTP ${status}).`;
+}
+async function request(url, options) {
+  let response;
+  try { response = await fetch(url, options); }
+  catch { throw Error('Cannot reach the server. Check your connection and retry.'); }
+  let data = null;
+  try { data = await response.json(); } catch {}  // Proxies can return HTML error pages.
+  if (!response.ok) throw Error(typeof data?.detail === 'string' ? data.detail : statusMessage(response.status));
+  if (data === null) throw Error('The server returned an unreadable response. Please retry.');
+  return data;
+}
+request('/healthz').then(data=>{
+  if (Number.isFinite(data.max_upload_mb) && data.max_upload_mb > 0) maxMB = data.max_upload_mb;
+  $('file-help').textContent = `One file · up to ${maxMB} MB`;
+  if (!data.parser_configured) notice('LlamaParse is not configured yet. Add a LlamaParse API key to the server environment to enable reviews.');
+  else if (data.config_errors?.length) notice('Server configuration error: ' + data.config_errors.join(' '));
+}).catch(error=>notice(`${error.message} Refresh to retry.`));
 $('upload-form').addEventListener('submit', async e => {
   e.preventDefault(); if (busy) return;
   const file = $('file').files[0];
@@ -27,7 +48,7 @@ $('upload-form').addEventListener('submit', async e => {
       try { job = await request(created.status_url); failures = 0; }
       catch (error) { if (++failures >= 5) throw error; $('stage').textContent = 'Reconnecting to your review…'; continue; }
       $('stage').textContent = job.stage;
-      if (job.status === 'failed') throw Error(job.error);
+      if (job.status === 'failed') throw Error(job.error || 'The review could not complete. Please retry.');
       if (job.status === 'completed') { showReport(job); break; }
     }
   } catch (error) {notice(error.message);}
@@ -49,7 +70,7 @@ function showReport(job) {
   $('download').href = `/api/reviews/${activeId}/report`;
   $('page-select').replaceChildren();
   for (let page=1;page<=activeReport.page_count;page++){const option = element('option', `${page} / ${activeReport.page_count}`); option.value = page; $('page-select').append(option);}
-  $('filter').value = 'all'; showIssues(); showExtracted(); preview(1);
+  $('filter').value = 'all'; showIssues(); showPassedChecks(); showExtracted(); preview(1);
   $('results').hidden = false; $('results-title').focus({preventScroll:true}); $('results').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function showIssues() {
@@ -64,6 +85,30 @@ function showIssues() {
     card.append(head,element('h4',[issue.section,issue.row,issue.field].filter(Boolean).join(' · ')),element('p',issue.message));
     if (issue.observed !== null) card.append(element('p',`Read as: ${issue.observed || '(blank)'}`,'observed'));
     $('issue-list').append(card);
+  }
+}
+function showPassedChecks() {
+  const checks = activeReport.passed_checks || [];
+  $('passed-checks').open = false;
+  $('passed-count').textContent = checks.length;
+  $('passed-list').replaceChildren();
+  if (!checks.length) $('passed-list').append(element('p', 'No passed checks were recorded for this document.', 'empty'));
+  for (const check of checks) {
+    const card = element('article', '', 'issue passed-check');
+    const head = element('div', '', 'issue-head');
+    head.append(element('span', 'Passed', 'issue-badge'));
+    const button = element('button', `Page ${check.page} ↗`, 'page-link');
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      preview(check.page);
+      if (window.innerWidth < 850) $('preview').scrollIntoView({behavior:'smooth'});
+    });
+    head.append(button);
+    card.append(head,
+      element('h4', [check.section, check.row, check.field].filter(Boolean).join(' · ')),
+      element('p', check.message),
+      element('p', `Read as: ${check.observed || '(blank)'}`, 'observed'));
+    $('passed-list').append(card);
   }
 }
 function showExtracted() {

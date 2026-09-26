@@ -2,7 +2,7 @@
 import re
 from datetime import datetime
 
-from reviewer.models import Cell, Issue, ParsedPage, ReviewReport
+from reviewer.models import Cell, Issue, ParsedPage, ReviewReport, PassedCheck
 from reviewer.discard import DISCARD_SECTIONS, review_discard_page
 
 SECTIONS = {
@@ -60,7 +60,14 @@ def identify(text: str) -> str:
 class Checker:
     def __init__(self):
         self.issues = []
+        self.passed_checks = []
         self.checks = 0
+
+    def passed(self, rule, page, section, row, field, message, observed):
+        self.passed_checks.append(PassedCheck(
+            rule=rule, page=page, section=SECTIONS.get(section, section), row=row,
+            field=FIELDS.get(field, field), message=message, observed=observed,
+        ))
 
     def add(self, rule, page, section, row, field, message, observed=None, manual=False):
         self.issues.append(Issue(
@@ -69,7 +76,7 @@ class Checker:
             message=message, observed=observed,
         ))
 
-    def required(self, cell, page, section, row, field, *, shading=False):
+    def required(self, cell, page, section, row, field, *, shading=False, record=True):
         self.checks += 1
         if cell is None:
             self.add('extraction.missing_cell', page, section, row, field,
@@ -97,17 +104,23 @@ class Checker:
             self.add(section + '.required', page, section, row, field,
                      'Required field is blank. Enter a value or explicit N/A where applicable.', cell.text)
             return False
+        if record:
+            self.passed(section + '.required', page, section, row, field,
+                        'Required entry is present.', cell.text)
         return True
 
     def by_date(self, cell, page, section, row, field, *, allow_na=False, strict_date=False):
-        if not self.required(cell, page, section, row, field):
+        if not self.required(cell, page, section, row, field, record=False):
             return
         if allow_na and is_na(cell.text):
+            self.passed(section + '.na', page, section, row, field,
+                        'Explicit N/A satisfies this review entry; initials and date are not required.', cell.text)
             return
         if allow_na and cell.text.strip().upper() in {'NA', 'N.A.', 'N.A'}:
             self.add('qs_reviews.na_ambiguous', page, section, row, field,
                      'Verify that this entry explicitly says N/A, or supply initials and a date.', cell.text, True)
             return
+        issues_before = len(self.issues)
         self.checks += 2
         if is_blank(cell.initials) or is_na(cell.initials):
             self.add(section + '.initials', page, section, row, field,
@@ -130,6 +143,11 @@ class Checker:
             if not valid:
                 self.add('qs_reviews.date_format', page, section, row, field,
                          'Date must be a valid calendar date in MM/DD/YY order (e.g. 04/23/26 or 04-23-26).', cell.date)
+        if len(self.issues) == issues_before:
+            message = ('Initials and a valid calendar date in MM/DD/YY order are present.'
+                       if strict_date else 'Both initials and a date are present.')
+            self.passed(section + '.by_date', page, section, row, field, message,
+                        f'{cell.text}\nInitials: {cell.initials}\nDate: {cell.date}')
 
 
 def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
@@ -201,7 +219,13 @@ def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
                     if inc is None or inc.state == 'uncertain':
                         c.add('extraction.inc', p.page, key, label, 'inc', 'Cannot determine whether an INC # is entered.', manual=True)
                     elif inc.state != 'blank' and not is_blank(inc.text) and not is_na(inc.text):
-                        c.required(cells.get('status'), p.page, key, label, 'status')
+                        if c.required(cells.get('status'), p.page, key, label, 'status', record=False):
+                            c.passed('qs_inc.status', p.page, key, label, 'status',
+                                     'An entered INC # has an adjacent Status entry.',
+                                     f'INC #: {inc.text}\nStatus: {cells["status"].text}')
+                    else:
+                        c.passed('qs_inc.not_required', p.page, key, label, 'inc',
+                                 'No INC # is entered (blank or N/A); adjacent Status is not required.', inc.text)
                 else:
                     required = {
                         'lot_items': ['lot_number', 'expiration_date', 'manufacturer'],
@@ -227,7 +251,5 @@ def review(pages: list[ParsedPage], page_count: int) -> ReviewReport:
     summary = ('All applicable challenge checks passed. Staff review is still required.' if status == 'passed'
                else f'{errors} field issue(s), {uncertain} item(s) requiring manual verification. This form has not passed all checks.')
     return ReviewReport(form_type=form, status=status, summary=summary, page_count=page_count,
-                        checks_run=c.checks, issues=c.issues, extracted_pages=pages)
-
-
+                        checks_run=c.checks, issues=c.issues, passed_checks=c.passed_checks, extracted_pages=pages)
 

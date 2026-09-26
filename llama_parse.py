@@ -2,6 +2,7 @@
 import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 
 from llama_cloud import LlamaCloud
@@ -12,7 +13,23 @@ from reviewer.prompts import EXTRACTION_PROMPT
 
 
 class ExtractionError(RuntimeError):
-    pass
+    def __init__(self, message, *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def validation_diagnostic(exc: ValidationError) -> str:
+    """Report schema paths/types without logging document values or arbitrary keys."""
+    schema = PageExtraction.model_json_schema()
+    safe_fields = set(schema.get("properties", {}))
+    for definition in schema.get("$defs", {}).values():
+        safe_fields.update(definition.get("properties", {}))
+    details = []
+    for error in exc.errors(include_input=False, include_context=False, include_url=False)[:8]:
+        path = ".".join(str(part) if isinstance(part, int) or part in safe_fields
+                        else "[key]" for part in error["loc"]) or "root"
+        details.append(f"{path}: {error['type']}")
+    return f"schema validation ({exc.error_count()} errors): " + "; ".join(details)
 
 
 def normalize_envelope(payload):
@@ -44,27 +61,103 @@ def normalize_envelope(payload):
     return payload
 
 
+def recover_partial_page(payload, errors):
+    """Recover known metadata omissions without inventing any entered values."""
+    skipped = set()
+    missing_states = []
+    for error in errors:
+        loc = error['loc']
+        if (error['type'] == 'literal_error' and len(loc) == 3
+                and loc[0] == 'sections' and isinstance(loc[1], int) and loc[2] == 'key'):
+            skipped.add(loc[1])
+        elif (error['type'] == 'missing' and len(loc) == 7
+                and loc[0] == 'sections' and isinstance(loc[1], int)
+                and loc[2] == 'rows' and isinstance(loc[3], int)
+                and loc[4] == 'cells' and isinstance(loc[5], str) and loc[6] == 'state'):
+            missing_states.append(loc)
+        else:
+            return None  # Other malformed data must still fail validation.
+
+    partial = deepcopy(payload)
+    counts = {}
+    for loc in missing_states:
+        if loc[1] in skipped:
+            continue
+        cell = partial['sections'][loc[1]]['rows'][loc[3]]['cells'][loc[5]]
+        cell['state'] = 'uncertain'
+        counts[loc[1]] = counts.get(loc[1], 0) + 1
+    partial['sections'] = [section for index, section in enumerate(partial['sections'])
+                           if index not in skipped]
+    partial['complete'] = False
+    partial['uncertainties'] = list(partial['uncertainties']) + [
+        f'Skipped extracted section {index + 1} because its section name was not recognized. '
+        'Check this section on the original PDF.' for index in sorted(skipped)
+    ] + [
+        f'Extracted section {index + 1}: LlamaParse omitted the filled/blank/uncertain state '
+        f'for {count} cell(s). Their text is preserved, but the entries require manual verification.'
+        for index, count in sorted(counts.items())
+    ]
+    return PageExtraction.model_validate(partial)
+
+
 def parse_page_json(markdown: str) -> PageExtraction:
     text = markdown.strip()
+    if not text:
+        raise ExtractionError(
+            "LlamaParse returned no transcription for this page. "
+            "Retry the document; it has not passed review.", diagnostic="empty transcription"
+        )
     fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
     if fenced:
         text = fenced.group(1)
     try:
-        return PageExtraction.model_validate(normalize_envelope(json.loads(text)))
-    except (ValueError, ValidationError) as exc:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise ExtractionError(
-            "LlamaParse returned incomplete or unstructured transcription. "
-            "Retry with a clearer scan; this document has not passed review."
+            "LlamaParse returned a transcription that is not valid JSON. "
+            "Retry the document; it has not passed review.",
+            diagnostic=f"invalid JSON at line {exc.lineno}, column {exc.colno}",
         ) from exc
+    payload = normalize_envelope(payload)
+    try:
+        return PageExtraction.model_validate(payload)
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False, include_context=False, include_url=False)
+        partial = recover_partial_page(payload, errors)
+        if partial is not None:
+            return partial
+        raise ExtractionError(
+            "LlamaParse returned JSON that does not match the required form structure. "
+            "Retry the document; if this repeats, check the server logs for schema errors. "
+            "The document has not passed review.", diagnostic=validation_diagnostic(exc),
+        ) from exc
+
+
+def parse_timeout():
+    try:
+        value = float(os.getenv("LLAMA_PARSE_TIMEOUT", "300"))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def config_problems() -> list[str]:
+    """Parser settings that would make every review fail; checked before accepting uploads."""
+    problems = []
+    if os.getenv("LLAMA_PARSE_TIER", "agentic") not in {"agentic", "agentic_plus"}:
+        problems.append("LLAMA_PARSE_TIER must be agentic or agentic_plus.")
+    if parse_timeout() is None:
+        problems.append("LLAMA_PARSE_TIMEOUT must be a positive number of seconds.")
+    return problems
 
 
 def run_parse(source_pdf: str | Path, page_count: int) -> list[ParsedPage]:
     key = os.getenv("LLAMA_CLOUD_API_KEY") or os.getenv("LLAMA_PARSE_API_KEY")
     if not key:
         raise ExtractionError("Set LLAMA_CLOUD_API_KEY or LLAMA_PARSE_API_KEY on the server.")
+    if problems := config_problems():
+        raise ExtractionError(" ".join(problems))
     tier = os.getenv("LLAMA_PARSE_TIER", "agentic")
-    if tier not in {"agentic", "agentic_plus"}:
-        raise ExtractionError("LLAMA_PARSE_TIER must be agentic or agentic_plus.")
     with LlamaCloud(api_key=key, timeout=60, max_retries=2) as client:
         result = client.parsing.parse(
             upload_file=Path(source_pdf), tier=tier,
@@ -73,7 +166,7 @@ def run_parse(source_pdf: str | Path, page_count: int) -> list[ParsedPage]:
             expand=["markdown"],
             output_options={"markdown": {"tables": {"merge_continued_tables": False}}},
             processing_control={"job_failure_conditions": {"allowed_page_failure_ratio": 0.001}},
-            timeout=float(os.getenv("LLAMA_PARSE_TIMEOUT", "300")),
+            timeout=parse_timeout(),
         )
         payload = result.model_dump(mode="json")
     if payload.get("job", {}).get("status") != "COMPLETED":
@@ -88,8 +181,12 @@ def run_parse(source_pdf: str | Path, page_count: int) -> list[ParsedPage]:
         number = page.get("page_number")
         if not isinstance(number, int) or not 1 <= number <= page_count:
             raise ExtractionError("LlamaParse returned invalid page references.")
-        parsed.append(ParsedPage(page=number, extraction=parse_page_json(page.get("markdown") or "")))
+        try:
+            extraction = parse_page_json(page.get("markdown") or "")
+        except ExtractionError as exc:
+            raise ExtractionError(f"PDF page {number}: {exc}",
+                                  diagnostic=f"page {number}: {exc.diagnostic}") from exc
+        parsed.append(ParsedPage(page=number, extraction=extraction))
     if len({p.page for p in parsed}) != page_count:
         raise ExtractionError("LlamaParse returned duplicate or missing pages.")
     return sorted(parsed, key=lambda p: p.page)
-

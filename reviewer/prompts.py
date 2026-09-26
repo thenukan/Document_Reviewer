@@ -106,6 +106,10 @@ printed_page, complete, uncertainties, sections. form_type is REQUIRED even when
 identification_text contains the form title. sections MUST be an ARRAY of objects.
 Each section object MUST have exactly key, listed_row_count, rows. Each row object
 MUST have key, label, cells. A cells object maps each specified cell name to a Cell.
+EVERY Cell MUST include text AND state, including every MP-F-023 produced and
+packaged cell. state must be filled, blank, or uncertain; never omit it to shorten
+large tables. Use uncertain when the cell cannot be read confidently. Shaded cells
+still need text and state plus their shaded flag. Preserve every listed row.
 NEVER put discard_header, discard_status, discard_tissues, discard_bottom, or any
 other section name directly at the root. NEVER put listed_row_count at the root.
 For example the structural path to a donor number is:

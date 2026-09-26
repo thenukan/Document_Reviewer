@@ -57,6 +57,16 @@ class Issue(StrictModel):
     observed: str | None = None
 
 
+class PassedCheck(StrictModel):
+    rule: str
+    page: int
+    section: str
+    row: str
+    field: str
+    message: str
+    observed: str
+
+
 class ReviewReport(StrictModel):
     form_type: str
     status: Literal["passed", "issues_found", "needs_review", "unsupported"]
@@ -64,6 +74,7 @@ class ReviewReport(StrictModel):
     page_count: int
     checks_run: int
     issues: list[Issue]
+    passed_checks: list[PassedCheck] = Field(default_factory=list)
     extracted_pages: list[ParsedPage]
     rules_version: str = "regenmed-hackathon-2"
     scope: str = "Pre-review only. The required two-person staff review remains in place."

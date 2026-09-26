@@ -101,11 +101,17 @@ def review_discard_page(c, parsed):
                           'Unrecognized Tissue Status option; verify the form layout.', manual=True)
                 state = checkbox(c, row.cells.get('value'), page, key, label, 'value')
                 status_cells[row.key] = state
+                if state is not None and row.key in STATUS_FIELDS:
+                    c.passed('discard_status.checkbox', page, key, label, 'value',
+                             'Checkbox state is readable.', 'Checked' if state else 'Unchecked')
             elif key == 'discard_tissues':
                 confirmed = checkbox(c, row.cells.get('confirmation_x'), page, key, row.label, 'confirmation_x')
                 if confirmed is False:
                     c.add('discard_tissues.confirmation', page, key, row.label, 'confirmation_x',
                           'Complete the small X confirmation box for this listed tissue.', '')
+                elif confirmed is True:
+                    c.passed('discard_tissues.confirmation', page, key, row.label, 'confirmation_x',
+                             'The listed tissue has a completed X confirmation box.', row.cells['confirmation_x'].text)
                 tissues.append((row, graft_kind(c, row.cells.get('graft_id'), page, row.label)))
 
     c.checks += 1
@@ -121,6 +127,8 @@ def review_discard_page(c, parsed):
     if not status_known or len(selected) != 1:
         return
     chosen = selected[0]
+    c.passed('discard_status.selection', page, 'discard_status', '', 'Tissue Status',
+             'Exactly one Tissue Status is selected.', STATUS_FIELDS[chosen])
     for row, kind in tissues:
         if kind is None:
             continue
@@ -132,3 +140,7 @@ def review_discard_page(c, parsed):
             c.add('discard_status.graft_mismatch', page, 'discard_tissues', row.label, 'graft_id',
                   f'{reason}; Tissue Status must be {required}.',
                   f'{row.cells["graft_id"].text}; checked: {STATUS_FIELDS[chosen]}')
+        else:
+            c.passed('discard_status.graft_match', page, 'discard_tissues', row.label, 'graft_id',
+                     'Tissue Status is consistent with the Graft ID entry.',
+                     f'{row.cells["graft_id"].text}; checked: {STATUS_FIELDS[chosen]}')
