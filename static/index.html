@@ -1,0 +1,23 @@
+﻿<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RegenMed · Document Reviewer</title><link rel="stylesheet" href="/static/style.css"><script defer src="/static/app.js"></script></head>
+<body>
+<header><a class="brand" href="/" aria-label="RegenMed reviewer home"><span class="mark">R</span><span>RegenMed<small>INTERNAL DOCUMENT REVIEWER</small></span></a><span class="tag">PRE-REVIEW WORKSPACE</span></header>
+<main>
+<section class="intro"><p class="eyebrow">A SECOND LOOK, BEFORE STAFF REVIEW</p><h1>Catch the small things.<br><span>Focus on what matters.</span></h1><p>Check processing forms for missing entries and incomplete reviews.<br class="wide"> Upload one PDF to identify the form and check its requirements.</p></section>
+<div class="form-types"><span>MP-F-023 <small>Tissue open checklist</small></span><span>QS-F-049 <small>Technical / quality review</small></span><span>Lot Logs <small>Processing & packaging</small></span></div>
+<section class="upload-panel" aria-labelledby="upload-title">
+<div><p class="eyebrow">01 / DOCUMENT</p><h2 id="upload-title">Start a review</h2><p class="muted">Handwritten and scanned forms welcome.</p></div>
+<form id="upload-form"><label class="dropzone" id="dropzone" for="file"><span class="upload-icon" aria-hidden="true">↑</span><strong id="file-label">Choose a PDF or drop it here</strong><span id="file-help">One file · up to 20 MB</span><input id="file" name="file" type="file" accept=".pdf,application/pdf" required></label><div class="upload-bottom"><span>Processed securely through LlamaParse.<br>Local copies expire automatically.</span><button id="submit" type="submit">Review document <span aria-hidden="true">↗</span></button></div></form>
+</section>
+<div id="notice" role="status" aria-live="polite" hidden></div>
+<section id="progress" class="progress" hidden aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><strong id="stage">Reading your document</strong><p>Handwriting analysis can take a few minutes. Keep this page open.</p></div></section>
+<section id="results" hidden aria-labelledby="results-title">
+<div class="results-heading"><div><p class="eyebrow">02 / FINDINGS</p><h2 id="results-title" tabindex="-1">Review results</h2><p id="filename" class="muted"></p></div><a id="download" class="secondary" download>Download report ↓</a></div>
+<div id="summary" class="summary"><div><span id="form-type" class="tag"></span><h3 id="result-title"></h3><p id="result-description"></p></div><div class="metrics"><strong id="issue-count"></strong><span>findings</span><strong id="checks-count"></strong><span>checks run</span></div></div>
+<div class="review-grid"><div class="findings"><div class="findings-header"><h3>What needs attention</h3><select id="filter" aria-label="Filter findings"><option value="all">All findings</option><option value="error">Field issues</option><option value="manual_review">Manual verification</option></select></div><div id="issue-list"></div><details><summary>View extracted values</summary><p class="muted">Transcribed values are provided for verification against the original form.</p><div id="extracted"></div></details></div><aside class="document"><div class="preview-toolbar"><strong>Original document</strong><label>Page <select id="page-select" aria-label="Preview page"></select></label></div><div class="image-scroll"><img id="preview" alt="Original uploaded form page"></div><p class="preview-note">Select a finding to view its page. Use its section, row, and field to locate the entry.</p></aside></div>
+</section>
+<footer><span class="footer-dot"></span><p>Supports the required two-person review. A pre-review pass is not authorization to release tissue.</p><span class="footer-label">REGENMED HACKATHON</span></footer>
+</main>
+</body></html>
+

@@ -1,0 +1,19 @@
+﻿services:
+  reviewer:
+    build: .
+    image: regenmed-reviewer:latest
+    ports:
+      - "8000:8000"
+    environment:
+      LLAMA_PARSE_API_KEY: ${LLAMA_PARSE_API_KEY:-}
+      LLAMA_CLOUD_API_KEY: ${LLAMA_CLOUD_API_KEY:-}
+      LLAMA_PARSE_TIER: ${LLAMA_PARSE_TIER:-agentic}
+      LLAMA_PARSE_VERSION: ${LLAMA_PARSE_VERSION:-latest}
+      LLAMA_PARSE_TIMEOUT: ${LLAMA_PARSE_TIMEOUT:-300}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      MAX_PAGES: ${MAX_PAGES:-10}
+      REVIEW_TTL_SECONDS: ${REVIEW_TTL_SECONDS:-3600}
+    restart: unless-stopped
+    init: true
+    mem_limit: 1g
+    cpus: 2

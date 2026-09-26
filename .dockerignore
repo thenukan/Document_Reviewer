@@ -1,0 +1,10 @@
+﻿.env
+.env.*
+!.env.example
+samples/
+.review-dev/
+tests/
+**/__pycache__/
+*.pyc
+.git/
+.vscode/
